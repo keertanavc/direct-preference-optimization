@@ -45,7 +45,7 @@ def strip_html_tags(html_string):
 
 def get_se(split, silent=False, cache_dir: str = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
     """Load the StackExchange dataset from Huggingface, and return a dict of prompts and responses. See get_hh for the format.
-    
+
        We strip the HTML tags from the responses (except for <code> tags), and we add necessary newlines.
     """
     print(f'Loading SE dataset ({split} split) from Huggingface...')
@@ -119,7 +119,7 @@ def get_shp(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str
 
 def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
     """Load the Anthropic Helpful-Harmless dataset from Huggingface and convert it to the necessary format.
-    
+
        The dataset is converted to a dictionary with the following structure:
        {
            'prompt1': {
@@ -135,7 +135,7 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
        Prompts should be structured as follows:
          \n\nHuman: <prompt>\n\nAssistant:
        Multiple turns are allowed, but the prompt should always start with \n\nHuman: and end with \n\nAssistant:.
-       
+
        For this dataset, the sft_target is just the chosen response.
     """
     print(f'Loading HH dataset ({split} split) from Huggingface...')
@@ -159,6 +159,40 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
 
     return data
 
+def get_imdb(split: str, name: str, silent: bool = False, cache_dir: str = None, weights_dict: Dict = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    # assign equal weight to all data points, i.e. perform regular DPO is no weights are passed
+    print(f'Loading IMDb dataset ({split} split) from Huggingface...')
+    dataset = datasets.load_dataset("keertanavc/imdb_prefix20_forDPO_gpt2-large-imdb_multi-preference", split=split, cache_dir=cache_dir)
+    print('done')
+    def split_prompt_and_responses(ex):
+        row_data = {}
+        row_data['prompt'] = ex['prompt']
+        row_data['chosen_response'] = ex['chosen']
+        row_data['rejected_response'] = ex['rejected']
+        row_data['pref_type'] = ex['pref_type']
+        substring_to_remove = '<|endoftext|>'
+        row_data['prompt'] = row_data['prompt'].replace(substring_to_remove, "")
+        row_data['chosen_response'] = row_data['chosen_response'].replace(substring_to_remove, "")
+        row_data['rejected_response'] = row_data['rejected_response'].replace(substring_to_remove, "")
+        return row_data
+
+    data = defaultdict(lambda: defaultdict(list))
+    for row in tqdm.tqdm(dataset, desc='Processing IMDb', disable=silent):
+        row_data = split_prompt_and_responses(row)
+        pref_type = row_data['pref_type']
+        if pref_type == 1:
+            continue
+        prompt = row_data['prompt']
+        chosen = row_data['chosen_response']
+        rejected = row_data['rejected_response']
+        responses = [chosen, rejected]
+        n_responses = len(data[prompt]['responses'])
+        data[prompt]['pairs'].append((n_responses, n_responses + 1))
+        data[prompt]['responses'].extend(responses)
+        data[prompt]['sft_target'] = chosen
+    return data
+###
+
 
 def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None):
     """Load the given dataset by name. Supported by default are 'shp', 'hh', and 'se'."""
@@ -168,6 +202,8 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
         data = get_hh(split, silent=silent, cache_dir=cache_dir)
     elif name == 'se':
         data = get_se(split, silent=silent, cache_dir=cache_dir)
+    elif name == 'imdb':
+        data = get_imdb(split, name, silent=silent, cache_dir=cache_dir)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 
@@ -179,7 +215,7 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
 
 def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, torch.Tensor]]]:
     """Returns a collate function for the given tokenizer.
-    
+
        The collate function takes a list of examples (dicts, where values are lists of
          ints [tokens] or strings [the original texts]) and returns a batch of examples,
          PyTorch tensors padded to the maximum length. Strings are passed through."""
@@ -213,11 +249,11 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
 
 def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, max_length: int, max_prompt_length: int) -> Dict:
     """Tokenize a single batch element.
-    
+
        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
          in case the prompt + chosen or prompt + rejected responses is/are too long. First
          we truncate the prompt; if we're still too long, we truncate the chosen/rejected.
-       
+
        We also create the labels for the chosen/rejected responses, which are of length equal to
          the sum of the length of the prompt and the chosen/rejected response, with -100 for the
          prompt tokens.
